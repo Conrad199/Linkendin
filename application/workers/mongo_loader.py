@@ -15,7 +15,6 @@ from application.config import (
 )
 
 
-
 class MongoLoader(QThread):
     """Charge les entreprises sans LinkedIn depuis MongoDB avec leurs données complètes."""
     done    = pyqtSignal(list, int)
@@ -65,12 +64,36 @@ class MongoLoader(QThread):
 
             self.log.emit(f"⬇️  Chargement de {self.batch} entreprises pour continuer…")
             projection = {
-                "_id": 1, "companyName": 1, "tradeName": 1,
-                "url": 1, "domains": 1, "socialAccounts": 1,
-                "countryCode": 1, "location": 1, "street": 1,
-                "streetName": 1, "streetNumber": 1, "zip": 1,
-                "region": 1, "description": 1, "resultsSignals": 1,
-                "resultsWebsite": 1, "status": 1
+                "_id": 1,
+                "companyName": 1,
+                "tradeName": 1,
+                "url": 1,
+                "website": 1,
+                "domains": 1,
+                "socialAccounts": 1,
+                "countryCode": 1,
+                "location": 1,
+                "street": 1,
+                "streetName": 1,
+                "streetNumber": 1,
+                "postalCode": 1,
+                "zipCode": 1,
+                "zip": 1,
+                "region": 1,
+                "email": 1,
+                "emails": 1,
+                "phone": 1,
+                "phones": 1,
+                "contact": 1,
+                "description": 1,
+                "about": 1,
+                "activities": 1,
+                "activity": 1,
+                "sector": 1,
+                "industry": 1,
+                "resultsSignals": 1,
+                "resultsWebsite": 1,
+                "status": 1,
             }
             cursor = col.find(query, projection).sort("_id", 1).limit(self.batch)
 

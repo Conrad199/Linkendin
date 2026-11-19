@@ -1,90 +1,68 @@
 from __future__ import annotations
 
-import difflib
-import re
-import time
-import urllib.parse
 from datetime import datetime, timezone
 from html import escape as escape_html
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QPalette, QTextCursor, QFont
-from PyQt6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel,
-    QMainWindow, QMessageBox, QProgressBar, QPushButton,
-    QSizePolicy, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
-    QLineEdit, QCheckBox, QDialog, QTabWidget, QDialogButtonBox,
-    QComboBox, QStatusBar,
-)
-
 from bson import ObjectId
 from pymongo import MongoClient
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import (
-    TimeoutException, NoSuchElementException, WebDriverException
+from PyQt6.QtGui import QTextCursor
+from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSpinBox,
+    QStatusBar,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
-from application.browser import (
-    extract_company_url,
-    get_chromedriver_service,
-    init_chrome_driver,
-    inject_li_at_cookie,
-    is_linkedin_logged_in,
-)
 from application.config import (
     CHECKPOINT_COLLECTION,
     CHECKPOINT_ID,
     COLLECTION,
     DB_NAME,
-    GOOGLE_SEARCH,
-    LI_FEED_URL,
-    LI_HOME_URL,
-    LI_LOGIN_URL,
-    LI_SEARCH_URL,
     MONGO_BATCH_SIZE,
     MONGO_URI,
-    WAIT_BETWEEN,
-    WAIT_PAGE,
     load_config,
     load_results,
     save_config,
     save_results,
 )
-from calcul.matching import (
-    calculate_precision_resemblance,
-    clean_company_name,
-    clean_linkedin_title,
-)
-
 from application.ui.login_dialog import LinkedInLoginDialog
 from application.workers.mongo_loader import MongoLoader
+from application.workers.schema_normalizer import SchemaNormalizerWorker
 from application.workers.scraper_worker import ScraperWorker
-
 
 
 class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("🔗 LinkedIn Auto-Enricher (Haute Précision)")
+        self.setWindowTitle("🔗 LinkedIn Auto-Enricher (Haute Précision • Continu)")
 
         self.companies: list[dict] = []
         self.total_count: int      = 0
         self.results: dict         = load_results()
         self.config: dict          = load_config()
 
-        self.mongo_worker:   Optional[MongoLoader]    = None
-        self.scraper_worker: Optional[ScraperWorker] = None
+        self.mongo_worker:      Optional[MongoLoader]            = None
+        self.scraper_worker:    Optional[ScraperWorker]          = None
+        self.normalizer_worker: Optional[SchemaNormalizerWorker] = None
         self.autoscroll: bool = True
         self.mongo_ready: bool = False
         self.scraping_active: bool = False
         self.auto_process_missing: bool = False
         self.direct_mongo_search: bool = False
         self.mongo_write_failed: bool = False
+        self.user_stopped: bool = False
         self.search_total: int = 0
         self.search_processed: int = 0
         self.last_batch_progress: int = 0
@@ -107,8 +85,6 @@ class MainWindow(QMainWindow):
 
         self.setGeometry(screen.x(), screen.y(), self.app_w, self.app_h)
 
-    # ── Construction UI Thème BLANC ───────────────────────────────────────────
-
     def _build_ui(self):
         root = QWidget()
         root.setStyleSheet("background:#F8FAFC;")
@@ -117,14 +93,16 @@ class MainWindow(QMainWindow):
         root_lay.setSpacing(0)
         root_lay.setContentsMargins(0, 0, 0, 0)
 
-        # ── Header Blanc ──
         header = QWidget()
         header.setStyleSheet("background:#FFFFFF;border-bottom:1px solid #E2E8F0;")
         header.setFixedHeight(54)
         h_lay = QHBoxLayout(header)
         h_lay.setContentsMargins(14, 0, 14, 0)
 
-        title = QLabel("🔗 LinkedIn Auto-Enricher <span style='font-size:11px;color:#16A34A;font-weight:normal;'>[Filtre Anti-Faux Positifs Actif]</span>")
+        title = QLabel(
+            "🔗 LinkedIn Auto-Enricher "
+            "<span style='font-size:11px;color:#16A34A;font-weight:normal;'>[Traitement Continu Actif]</span>"
+        )
         title.setStyleSheet("color:#0A66C2;font-size:15px;font-weight:bold;")
         h_lay.addWidget(title)
 
@@ -137,14 +115,12 @@ class MainWindow(QMainWindow):
 
         root_lay.addWidget(header)
 
-        # ── Barre de Contrôle Blanche ──
         ctrl_bar = QWidget()
         ctrl_bar.setStyleSheet("background:#FFFFFF;border-bottom:1px solid #E2E8F0;")
         c_lay = QVBoxLayout(ctrl_bar)
         c_lay.setContentsMargins(12, 10, 12, 10)
         c_lay.setSpacing(8)
 
-        # Ligne 1 : Boutons d'action principaux
         row1 = QHBoxLayout()
         row1.setSpacing(8)
 
@@ -168,7 +144,6 @@ class MainWindow(QMainWindow):
 
         c_lay.addLayout(row1)
 
-        # Ligne 2 : Options & Mode de recherche
         row2 = QHBoxLayout()
         row2.setSpacing(10)
 
@@ -194,7 +169,7 @@ class MainWindow(QMainWindow):
 
         self.check_sync_mongo = QCheckBox("Sync MongoDB")
         self.check_sync_mongo.setToolTip(
-            "Si activé, écrit dans MongoDB le lien LinkedIn validé après chaque recherche."
+            "Si activé, écrit dans MongoDB le lien LinkedIn validé (url, name, percentage) après chaque recherche."
         )
         self.check_sync_mongo.setChecked(self.config.get("sync_mongo", True))
         self.check_sync_mongo.setStyleSheet("color:#1E293B;font-size:11px;font-weight:500;")
@@ -206,7 +181,6 @@ class MainWindow(QMainWindow):
 
         root_lay.addWidget(ctrl_bar)
 
-        # ── Barre de progression & Métriques ──
         prog_bar_widget = QWidget()
         prog_bar_widget.setStyleSheet("background:#F1F5F9;border-bottom:1px solid #E2E8F0;")
         pb_lay = QVBoxLayout(prog_bar_widget)
@@ -236,7 +210,6 @@ class MainWindow(QMainWindow):
 
         root_lay.addWidget(prog_bar_widget)
 
-        # ── Terminal Blanc Épuré (Corps Principal) ──
         term_wrap = QWidget()
         term_wrap.setStyleSheet("background:#F8FAFC;")
         t_lay = QVBoxLayout(term_wrap)
@@ -281,8 +254,6 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.setStyleSheet("background:#FFFFFF;color:#64748B;font-size:11px;border-top:1px solid #E2E8F0;")
         self.status_bar.showMessage("Chargement des entreprises depuis MongoDB…")
-
-    # ── Styles Blancs Helpers ─────────────────────────────────────────────────
 
     def _btn_style(self, bg: str, hover: str, text_color: str = "white") -> str:
         return (
@@ -359,8 +330,6 @@ class MainWindow(QMainWindow):
         self.term_text.setTextCursor(cursor)
         self.status_bar.showMessage("📋 Logs copiés dans le presse-papier.", 3000)
 
-    # ── MongoDB Loading ───────────────────────────────────────────────────────
-
     def _load_from_mongo(self):
         self.mongo_ready = False
         self.btn_start.setEnabled(False)
@@ -374,6 +343,15 @@ class MainWindow(QMainWindow):
         self.mongo_worker.error.connect(self._on_mongo_error)
         self.mongo_worker.log.connect(self._log_info)
         self.mongo_worker.start()
+
+    def _start_background_schema_normalization(self):
+        if not self.check_sync_mongo.isChecked():
+            return
+        if self.normalizer_worker and self.normalizer_worker.isRunning():
+            return
+        self.normalizer_worker = SchemaNormalizerWorker(batch_limit=25)
+        self.normalizer_worker.log.connect(self._log_info)
+        self.normalizer_worker.start()
 
     def _connect_scraper_worker(self, worker: ScraperWorker):
         worker.company_started.connect(self._on_company_started)
@@ -411,17 +389,19 @@ class MainWindow(QMainWindow):
 
         self._update_stats()
         self.status_bar.showMessage(
-            f"✅ Analyse prête | {total:,} entreprise(s) à traiter après le point de reprise"
+            f"✅ Analyse prête | {total:,} entreprise(s) restantes après le point de reprise"
         )
         if self.auto_process_missing and self.search_total == 0:
             self.search_total = total
         self.last_batch_progress = 0
-        self.progress_bar.setMaximum(
-            self.search_total if self.auto_process_missing else len(self.companies)
+        if not self.auto_process_missing:
+            self.progress_bar.setMaximum(len(self.companies))
+            self.progress_bar.setValue(0)
+        self._log_info(
+            f"✨ Lot de {len(self.companies)} entreprise(s) prêt. Analyse de haute précision active !"
         )
-        self.progress_bar.setValue(0)
-        self._log_info("✨ Entreprises prêtes. Analyse de haute précision active !")
-        if self.auto_process_missing:
+        self._start_background_schema_normalization()
+        if self.auto_process_missing and not self.user_stopped:
             if self.companies:
                 self._start_scraping()
             else:
@@ -445,12 +425,11 @@ class MainWindow(QMainWindow):
             f"Non trouvés : <span style='color:#DC2626;'>{skipped}</span>"
         )
 
-    # ── Gestion du Clic Lancer & Résolution ────────────────────────────────────
-
     def _on_start_clicked(self):
         self.auto_process_missing = True
         self.direct_mongo_search = True
         self.mongo_write_failed = False
+        self.user_stopped = False
         self.search_processed = 0
         self.last_batch_progress = 0
         self.search_total = self.total_count if self.mongo_ready else 0
@@ -466,7 +445,7 @@ class MainWindow(QMainWindow):
 
         if not self.check_sync_mongo.isChecked():
             self.check_sync_mongo.setChecked(True)
-        self._log_info("🗄️ Analyse automatique démarrée ; la progression est sauvegardée dans MongoDB.")
+        self._log_info("🗄️ Analyse automatique continue démarrée ; les lots de 25 s'enchaîneront automatiquement.")
         self._start_scraping()
 
     def _start_scraping(self):
@@ -520,13 +499,19 @@ class MainWindow(QMainWindow):
 
     def _stop_scraping(self):
         if self.scraper_worker:
+            self.user_stopped = True
             self.auto_process_missing = False
             self.scraper_worker.stop()
             self._log_info("⏹ Arrêt demandé par l'utilisateur…")
 
     def _update_mongo_document(self, cid: str, linkedin_profiles: list[dict]) -> bool:
         try:
-            with MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000) as client:
+            with MongoClient(
+                MONGO_URI,
+                serverSelectionTimeoutMS=15000,
+                connectTimeoutMS=15000,
+                socketTimeoutMS=20000,
+            ) as client:
                 col = client[DB_NAME][COLLECTION]
                 obj_id = ObjectId(cid) if ObjectId.is_valid(cid) else cid
                 result = col.update_one(
@@ -555,7 +540,12 @@ class MainWindow(QMainWindow):
     def _save_mongo_checkpoint(self, cid: str) -> bool:
         try:
             checkpoint_id = ObjectId(cid) if ObjectId.is_valid(cid) else cid
-            with MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000) as client:
+            with MongoClient(
+                MONGO_URI,
+                serverSelectionTimeoutMS=15000,
+                connectTimeoutMS=15000,
+                socketTimeoutMS=20000,
+            ) as client:
                 progress = client[DB_NAME][CHECKPOINT_COLLECTION]
                 progress.update_one(
                     {"_id": CHECKPOINT_ID},
@@ -574,8 +564,6 @@ class MainWindow(QMainWindow):
                 f"Impossible d'enregistrer le point de reprise pour {cid} : {exc}"
             )
             return False
-
-    # ── Événements Terminal Formatés en Thème BLANC ───────────────────────────
 
     def _on_company_started(self, idx: int, total: int, company: dict):
         name     = company.get("companyName") or company.get("tradeName") or "?"
@@ -600,20 +588,23 @@ class MainWindow(QMainWindow):
         company = next((c for c in self.companies if c["_id"] == cid), {})
         existing_social = dict(company.get("socialAccounts") or {})
 
+        # Exclut strictement tout score <= 0 (pas de 0 % dans les résultats ni dans MongoDB)
         matched_candidates = [
             candidate
             for candidate in candidates
-            if isinstance(candidate.get("resemblance"), (int, float))
-            and candidate["resemblance"] > 0
+            if isinstance(candidate.get("percentage", candidate.get("resemblance")), (int, float))
+            and (candidate.get("percentage", candidate.get("resemblance")) > 0)
         ]
+
         linkedin_profiles = [
             {
-                "link": candidate.get("link", ""),
+                "url": candidate.get("url") or candidate.get("URL") or candidate.get("link", ""),
                 "name": candidate.get("name", ""),
-                "resemblance": candidate.get("resemblance", 0),
+                "percentage": candidate.get("percentage", candidate.get("resemblance", 0)),
             }
             for candidate in matched_candidates
         ]
+
         validated_profiles = [
             profile
             for candidate, profile in zip(matched_candidates, linkedin_profiles)
@@ -643,7 +634,6 @@ class MainWindow(QMainWindow):
             }
             save_results(self.results)
 
-        # In automatic mode, persist only validated matches and checkpoint each result.
         synced_str = ""
         if self.direct_mongo_search:
             saved = True
@@ -668,22 +658,22 @@ class MainWindow(QMainWindow):
             else:
                 synced_str = " <span style='color:#DC2626;'>& échec Sync MongoDB</span>"
 
-        # Rendu haute précision dans le terminal blanc
         html = ["<div style='margin-left:12px; margin-bottom:8px; border-left:2px solid #E2E8F0; padding-left:8px;'>"]
         if best_url and matched_candidates:
-            html.append("  <span style='color:#B45309; font-size:10px; font-weight:bold;'>📋 Profils vérifiés & validés :</span><br>")
+            html.append("  <span style='color:#B45309; font-size:10px; font-weight:bold;'>📋 Profils vérifiés & validés (> 0%) :</span><br>")
             for i, cand in enumerate(matched_candidates[:3]):
-                score = cand.get("resemblance", 0)
+                score = cand.get("percentage", cand.get("resemblance", 0))
+                cand_url = cand.get("url") or cand.get("URL") or cand.get("link", "")
                 if i == 0:
                     html.append(
                         f"    <span style='color:#0F172A; font-weight:bold;'>[{i}] {cand.get('name')}</span> "
-                        f"— <span style='background:#DCFCE7; color:#15803D; font-weight:bold; padding:1px 5px; border-radius:3px;'>Concordance : {score}% ⭐ SÉLECTIONNÉ</span><br>"
-                        f"      <span style='color:#0A66C2;'>↳ <a href='{cand.get('link')}' style='color:#0A66C2; text-decoration:none;'>{cand.get('link')}</a></span><br>"
+                        f"— <span style='background:#DCFCE7; color:#15803D; font-weight:bold; padding:1px 5px; border-radius:3px;'>Pourcentage : {score}% ⭐ SÉLECTIONNÉ</span><br>"
+                        f"      <span style='color:#0A66C2;'>↳ <a href='{cand_url}' style='color:#0A66C2; text-decoration:none;'>{cand_url}</a></span><br>"
                     )
                 else:
                     html.append(
                         f"    <span style='color:#64748B;'>[{i}] {cand.get('name')}</span> — <span style='color:#B45309;'>{score}%</span><br>"
-                        f"      <span style='color:#64748B;'>↳ {cand.get('link')}</span><br>"
+                        f"      <span style='color:#64748B;'>↳ {cand_url}</span><br>"
                     )
 
             html.append(f"  <span style='color:#0369A1; font-weight:bold;'>💾 socialAccounts.linkedin</span> : <span style='color:#15803D; font-weight:bold;'>\"{best_url}\"</span><br>")
@@ -698,23 +688,29 @@ class MainWindow(QMainWindow):
                     f"✅ Sauvegardé dans JSON{synced_str}</span>"
                 )
         else:
-            html.append("  <span style='color:#DC2626; font-size:11px;'>❌ Aucun profil LinkedIn fiable trouvé.</span>")
-            if candidates:
+            html.append("  <span style='color:#DC2626; font-size:11px;'>❌ Aucun profil LinkedIn fiable trouvé (scores à 0 % exclus).</span>")
+            positive_candidates = [
+                candidate
+                for candidate in candidates
+                if isinstance(candidate.get("percentage", candidate.get("resemblance")), (int, float))
+                and (candidate.get("percentage", candidate.get("resemblance")) > 0)
+            ]
+            if positive_candidates:
                 best_candidate = max(
-                    candidates,
-                    key=lambda candidate: candidate.get("resemblance", 0),
+                    positive_candidates,
+                    key=lambda candidate: candidate.get("percentage", candidate.get("resemblance", 0)),
                 )
+                best_score = best_candidate.get("percentage", best_candidate.get("resemblance", 0))
                 html.append(
                     f" <span style='color:#64748B;'>"
-                    f"{len(candidates)} résultat(s) examinés ; meilleur score : "
-                    f"{best_candidate.get('resemblance', 0)}% "
+                    f"{len(positive_candidates)} profil(s) > 0% examinés ; meilleur score : "
+                    f"{best_score}% "
                     f"({escape_html(str(best_candidate.get('name', 'nom indisponible')))})."
                     "</span>"
                 )
             else:
                 html.append(
-                    " <span style='color:#64748B;'>Aucun résultat extrait ; "
-                    "vérifiez la connexion LinkedIn et le chargement de la recherche.</span>"
+                    " <span style='color:#64748B;'>Aucun profil avec correspondance positive extrait.</span>"
                 )
 
         html.append("</div>")
@@ -771,20 +767,17 @@ class MainWindow(QMainWindow):
     def _on_scraper_finished(self):
         if self.scraping_active:
             self.scraping_active = False
-            if self.auto_process_missing:
-                if self.last_batch_progress < len(self.companies):
-                    self.auto_process_missing = False
-                    self._log_error(
-                        "Le bloc en cours n'a pas été entièrement analysé ; "
-                        "la recherche automatique des lots suivants est arrêtée."
-                    )
-                    self._on_scraping_done()
-                    return
+            if self.auto_process_missing and not self.user_stopped and not self.mongo_write_failed:
+                self._log_info(
+                    "🔄 Lot de 25 terminé. Chargement automatique du lot suivant depuis MongoDB…"
+                )
                 self._load_next_batch()
                 return
             self._on_scraping_done()
         elif self.scraper_worker and self.scraper_worker.wait_for_start:
-            self._log_error("Chrome n'a pas pu rester ouvert. Vérifiez que Chrome et ChromeDriver sont installés, puis relancez l'application.")
+            self._log_error(
+                "Chrome n'a pas pu rester ouvert. Vérifiez que Chrome et ChromeDriver sont installés, puis relancez l'application."
+            )
 
     def _finish_missing_search(self):
         self.auto_process_missing = False
@@ -809,6 +802,8 @@ class MainWindow(QMainWindow):
         if self.scraper_worker and self.scraper_worker.isRunning():
             self.scraper_worker.stop()
             self.scraper_worker.wait()
+        if self.normalizer_worker and self.normalizer_worker.isRunning():
+            self.normalizer_worker.wait(2000)
         event.accept()
 
     def _on_need_login(self):
@@ -823,8 +818,6 @@ class MainWindow(QMainWindow):
             "</div>"
         )
         self._append_html(html)
-
-    # ── Helpers écriture terminal blanc ───────────────────────────────────────
 
     def _append_html(self, html: str):
         self.term_text.append(html)

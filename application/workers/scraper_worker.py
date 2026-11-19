@@ -34,7 +34,6 @@ from calcul.matching import (
 )
 
 
-
 class ScraperWorker(QThread):
     """
     Pilote Chrome positionné à côté de l'application :
@@ -154,7 +153,6 @@ class ScraperWorker(QThread):
             self.driver.get(GOOGLE_SEARCH.format(query=query_enc))
             time.sleep(2.0)
 
-            # Passer le consentement Google si présent
             try:
                 for btn in self.driver.find_elements(By.TAG_NAME, "button"):
                     t = btn.text.lower()
@@ -173,7 +171,6 @@ class ScraperWorker(QThread):
                     if not clean_url or clean_url in seen_urls:
                         continue
 
-                    # Extraire le nom nettoyé depuis la balise h3
                     cand_name = ""
                     h3s = el.find_elements(By.TAG_NAME, "h3")
                     if h3s:
@@ -205,7 +202,7 @@ class ScraperWorker(QThread):
         return valid_candidates[0]["link"], valid_candidates
 
     def _search_via_linkedin(self, company: dict) -> tuple[Optional[str], list[dict]]:
-        """Recherche directement sur LinkedIn avec filtrage de haute précision."""
+        """Recherche directement sur LinkedIn avec visite effective des fiches entreprises."""
         name = company.get("companyName") or company.get("tradeName") or ""
         cleaned_name = clean_company_name(name)
         queries = [cleaned_name]
@@ -258,6 +255,8 @@ class ScraperWorker(QThread):
                     By.CSS_SELECTOR,
                     "li.reusable-search__result-container, div.entity-result__item, div[data-chameleon-result-urn*='organization']"
                 )
+                
+                extracted_data = []
                 for c in containers:
                     try:
                         link_el = c.find_element(By.CSS_SELECTOR, "a[href*='/company/']")
@@ -279,6 +278,7 @@ class ScraperWorker(QThread):
                                     break
                         if not title_text:
                             title_text = link_el.text.strip()
+                            
                         cand_name = next(
                             (
                                 clean_linkedin_title(line.strip())
@@ -303,52 +303,36 @@ class ScraperWorker(QThread):
                         full_snippet = " • ".join(snippet_texts)
 
                         seen_urls.add(clean_url)
-                        cand = {
-                            "name": cand_name,
-                            "link": clean_url,
-                            "snippet": full_snippet
-                        }
-                        score, details = calculate_precision_resemblance(cand, company)
-                        cand["resemblance"] = score
-                        cand["is_valid"] = details["is_valid"]
-                        all_candidates.append(cand)
+                        extracted_data.append({"name": cand_name, "link": clean_url, "snippet": full_snippet})
                     except Exception:
                         continue
 
-                if not containers:
-                    elements = self.driver.find_elements(
-                        By.CSS_SELECTOR,
-                        "main a[href*='/company/'], [role='main'] a[href*='/company/']"
-                    )
-                    for el in elements:
-                        href = el.get_attribute("href") or ""
-                        clean_url = extract_company_url(href)
-                        if clean_url and clean_url not in seen_urls:
-                            seen_urls.add(clean_url)
-                            title_text = el.text.strip()
-                            cand_name = next(
-                                (
-                                    clean_linkedin_title(line.strip())
-                                    for line in title_text.splitlines()
-                                    if line.strip()
-                                    and line.strip().lower() not in {"follow", "suivre"}
-                                ),
-                                "",
-                            )
-                            if not cand_name:
-                                slug = urllib.parse.unquote(
-                                    clean_url.rsplit("/company/", 1)[-1]
-                                )
-                                cand_name = re.sub(r"[-_]+", " ", slug).strip()
-                            cand = {
-                                "name": cand_name,
-                                "link": clean_url,
-                                "snippet": ""
-                            }
-                            score, details = calculate_precision_resemblance(cand, company)
-                            cand["resemblance"] = score
-                            cand["is_valid"] = details["is_valid"]
-                            all_candidates.append(cand)
+                # Évaluation initiale et sélection du meilleur candidat prometteur à visiter en profondeur
+                for cand in extracted_data:
+                    score, details = calculate_precision_resemblance(cand, company)
+                    cand["resemblance"] = score
+                    cand["is_valid"] = details["is_valid"]
+                    all_candidates.append(cand)
+
+                # Si un candidat a un score correct (>45%), visiter sa page /about/ pour s'assurer de la cohérence réelle
+                promising = [c for c in all_candidates if c["resemblance"] >= 45.0]
+                if promising:
+                    promising.sort(key=lambda x: x["resemblance"], reverse=True)
+                    top_cand = promising[0]
+                    if not top_cand.get("visited"):
+                        try:
+                            about_url = top_cand["link"].rstrip("/") + "/about/"
+                            self.driver.get(about_url)
+                            time.sleep(1.5)
+                            body_text = self.driver.find_element(By.TAG_NAME, "body").text
+                            top_cand["snippet"] += f" [About Page Info: {body_text[:500]}]"
+                            # Recalculer le score avec les informations de la page About
+                            score, details = calculate_precision_resemblance(top_cand, company)
+                            top_cand["resemblance"] = score
+                            top_cand["is_valid"] = details["is_valid"]
+                            top_cand["visited"] = True
+                        except Exception:
+                            pass
 
                 if any(c["is_valid"] for c in all_candidates):
                     break

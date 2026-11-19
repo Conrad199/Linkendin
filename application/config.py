@@ -1,22 +1,52 @@
 import json
+import os
 from pathlib import Path
 
-
-MONGO_URI = (
-    "mongodb://adding_social_accounts_user:45dfgd454gf26zeerf"
-    "@57.129.18.234:27017/leadfeeder-social-accounts"
-    "?authSource=leadfeeder-social-accounts"
-)
-DB_NAME = "leadfeeder-social-accounts"
-COLLECTION = "adding_social_accounts"
-CHECKPOINT_COLLECTION = "linkedin_enrichment_progress"
-CHECKPOINT_ID = "missing_linkedin_companies"
-MONGO_BATCH_SIZE = 100
+from dotenv import load_dotenv
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_JSON = PROJECT_DIR / "linkedin_results.json"
 CONFIG_JSON = PROJECT_DIR / "configuration" / "config.json"
 CHROME_PROFILE_DIR = PROJECT_DIR / "chrome_profile"
+
+# Charge automatiquement un fichier .env local s'il existe (non versionné sur Git)
+load_dotenv(PROJECT_DIR / ".env")
+
+
+def _load_local_config_dict() -> dict:
+    if CONFIG_JSON.exists():
+        try:
+            data = json.loads(CONFIG_JSON.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+_LOCAL_CFG = _load_local_config_dict()
+
+MONGO_URI = (
+    os.getenv("MONGO_URI")
+    or _LOCAL_CFG.get("mongo_uri")
+    or "mongodb://localhost:27017/leadfeeder-social-accounts"
+)
+DB_NAME = os.getenv("DB_NAME") or _LOCAL_CFG.get("db_name") or "leadfeeder-social-accounts"
+COLLECTION = os.getenv("COLLECTION") or _LOCAL_CFG.get("collection") or "adding_social_accounts"
+CHECKPOINT_COLLECTION = (
+    os.getenv("CHECKPOINT_COLLECTION")
+    or _LOCAL_CFG.get("checkpoint_collection")
+    or "linkedin_enrichment_progress"
+)
+CHECKPOINT_ID = (
+    os.getenv("CHECKPOINT_ID")
+    or _LOCAL_CFG.get("checkpoint_id")
+    or "missing_linkedin_companies"
+)
+MONGO_BATCH_SIZE = int(
+    os.getenv("MONGO_BATCH_SIZE")
+    or _LOCAL_CFG.get("mongo_batch_size")
+    or 25  # Taille de lot sécurisée pour éviter les timeouts réseau
+)
 
 LI_HOME_URL = "https://www.linkedin.com"
 LI_FEED_URL = "https://www.linkedin.com/feed/"
@@ -50,12 +80,7 @@ def save_results(data: dict) -> None:
 
 
 def load_config() -> dict:
-    if CONFIG_JSON.exists():
-        try:
-            return json.loads(CONFIG_JSON.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+    return _load_local_config_dict()
 
 
 def save_config(cfg: dict) -> None:
