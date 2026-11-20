@@ -27,6 +27,7 @@ from application.config import (
     load_config,
     save_config,
 )
+from application.notifier import send_email_async
 from calcul.matching import (
     calculate_precision_resemblance,
     clean_company_name,
@@ -370,7 +371,9 @@ class ScraperWorker(QThread):
 
             if self.search_mode == "linkedin":
                 if not self._ensure_login():
-                    self.log.emit("❌ Impossible d'accéder à LinkedIn sans connexion. Basculez en mode 'Recherche Web' pour chercher sans compte.")
+                    msg = "Impossible d'accéder à LinkedIn sans connexion en mode LinkedIn Direct."
+                    self.log.emit(f"❌ {msg}")
+                    send_email_async("[LinkedIn Scraper] Alerte connexion LinkedIn", msg)
                     return
 
             to_process = [
@@ -414,6 +417,10 @@ class ScraperWorker(QThread):
 
         except Exception as exc:
             self.log.emit(f"❌ Erreur inattendue : {exc}")
+            send_email_async(
+                "[LinkedIn Scraper] Erreur critique dans ScraperWorker",
+                f"Une erreur inattendue est survenue dans ScraperWorker : {exc}",
+            )
         finally:
             if self.driver:
                 try:

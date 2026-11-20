@@ -36,6 +36,7 @@ from application.config import (
     save_config,
     save_results,
 )
+from application.notifier import send_email_async
 from application.ui.login_dialog import LinkedInLoginDialog
 from application.workers.mongo_loader import MongoLoader
 from application.workers.schema_normalizer import SchemaNormalizerWorker
@@ -415,6 +416,10 @@ class MainWindow(QMainWindow):
         self.btn_start.setText("🔄 Réessayer MongoDB")
         self.btn_start.setStyleSheet(self._btn_style("#DC2626", "#B91C1C"))
         self._log_error(f"MongoDB Erreur de connexion : {msg}")
+        send_email_async(
+            "[LinkedIn Scraper] Erreur de connexion MongoDB",
+            f"La connexion à MongoDB a échoué : {msg}",
+        )
         self.status_bar.showMessage("❌ Erreur de connexion MongoDB")
 
     def _update_stats(self):

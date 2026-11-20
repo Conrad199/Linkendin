@@ -3,8 +3,10 @@ from __future__ import annotations
 import sys
 
 from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
+from application.notifier import send_email_async
 from application.ui.main_window import MainWindow
 
 
@@ -25,4 +27,11 @@ def main():
 
     window = MainWindow()
     window.show()
+    QTimer.singleShot(
+        0,
+        lambda: send_email_async(
+            "[LinkedIn Scraper] Démarrage du projet",
+            "L'application LinkedIn Auto-Enricher a démarré sur le serveur Ubuntu.",
+        ),
+    )
     sys.exit(app.exec())
